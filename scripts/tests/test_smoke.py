@@ -1249,3 +1249,58 @@ def test_multi_version_anchor_map_marks_unique_resources(tmp_path):
     assert "sample_new_resource" not in anchors["0.9.0"]
     assert "sample_legacy_resource" in anchors["1.0.0"]
     assert "sample_legacy_resource" in anchors["0.9.0"]
+
+
+# ============================================================================
+# W-23196976: Region lock placeholder presence in generated portal
+#
+# Note on paths: this portal emits API detail pages at `apis/<slug>.html`
+# and MCP detail pages at `mcps/<slug>.html` (flat, not `<slug>/index.html`
+# as the plan draft assumed). The `generated_portal` fixture already returns
+# a `Path` pointing at the built output — reuse it as-is.
+# ============================================================================
+
+def test_region_lock_placeholders_present_on_detail_pages(generated_portal):
+    """W-23196976: #regionLockedLabel + #regionMismatchBanner must render
+    on API + MCP detail pages (AC 1, AC 2, AC 9)."""
+    portal_dir = generated_portal
+
+    api_pages = list((portal_dir / 'apis').glob('*.html'))
+    assert api_pages, "expected at least one API detail page in generated portal"
+
+    for page in api_pages:
+        soup = BeautifulSoup(page.read_text(encoding='utf-8'), 'html.parser')
+        assert soup.find(id='regionLockedLabel') is not None, (
+            f"missing #regionLockedLabel in {page}"
+        )
+        assert soup.find(id='regionMismatchBanner') is not None, (
+            f"missing #regionMismatchBanner in {page}"
+        )
+
+    mcp_pages = list((portal_dir / 'mcps').glob('*.html'))
+    assert mcp_pages, "expected at least one MCP detail page in generated portal"
+    for page in mcp_pages:
+        soup = BeautifulSoup(page.read_text(encoding='utf-8'), 'html.parser')
+        assert soup.find(id='regionMismatchBanner') is not None, (
+            f"missing #regionMismatchBanner in {page}"
+        )
+
+
+def test_region_lock_placeholders_absent_from_non_detail_pages(generated_portal):
+    """W-23196976: mismatch banner is scoped to detail pages — must not leak
+    onto homepage or Terraform provider pages (AC 12)."""
+    portal_dir = generated_portal
+
+    home = portal_dir / 'index.html'
+    if home.exists():
+        soup = BeautifulSoup(home.read_text(encoding='utf-8'), 'html.parser')
+        assert soup.find(id='regionMismatchBanner') is None, (
+            "homepage should not render #regionMismatchBanner"
+        )
+
+    tf_pages = list((portal_dir / 'terraform').rglob('*.html'))
+    for page in tf_pages:
+        soup = BeautifulSoup(page.read_text(encoding='utf-8'), 'html.parser')
+        assert soup.find(id='regionMismatchBanner') is None, (
+            f"Terraform page should not render #regionMismatchBanner: {page}"
+        )

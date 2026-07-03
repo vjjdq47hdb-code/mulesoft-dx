@@ -2507,6 +2507,7 @@ function updateAuthSummary() {
             regionText.textContent = 'US';
         }
     }
+    try { applyRegionLockToAuthModal(); } catch (_e) { /* modal not yet mounted */ }
 }
 
 function setAuthStatus(authenticated, message, authMethod) {
@@ -3673,6 +3674,194 @@ function filterServersForRegion(servers, region) {
     if (!anypointKnown && !platformKnown) return servers.slice();
     return filtered;
 }
+
+// ============ Region lock (W-23196976) ============
+
+function filterRemotesForRegion(remotes, region) {
+    if (!remotes || remotes.length === 0) return [];
+    if (!region) return remotes.slice();
+    var results = [];
+    for (var i = 0; i < remotes.length; i++) {
+        var remote = remotes[i];
+        var url = remote && remote.url ? String(remote.url) : '';
+        if (!url) continue;
+        var domainKey = _getDomainKeyFromUrl(url);
+        if (!domainKey) continue;
+        var allowed = DOMAIN_REGIONS[domainKey] || [];
+        for (var j = 0; j < allowed.length; j++) {
+            if (allowed[j] === region && url.indexOf(region) !== -1) {
+                results.push(remote);
+                break;
+            }
+        }
+    }
+    return results;
+}
+
+function _formatRegionLabel(region) {
+    if (!region) return '';
+    return String(region).toUpperCase();
+}
+
+function getLockedRegionState() {
+    var token = _safeSessionGet('anypoint_token');
+    var serverType = _safeSessionGet('anypoint_server_type');
+    var region = _safeSessionGet('anypoint_region');
+    var expired = false;
+    try {
+        expired = typeof isTokenExpired === 'function' ? isTokenExpired() : false;
+    } catch (_e) {
+        expired = true;
+    }
+    var locked = !!(token && !expired && serverType);
+    return {
+        locked: locked,
+        serverType: locked ? serverType : null,
+        region: locked ? (region || null) : null,
+        displayLabel: locked ? _formatRegionLabel(region) : ''
+    };
+}
+
+function _countDistinctRegionsForEntry(entry) {
+    if (!entry) return 0;
+    var regions = {};
+    var servers = entry.servers || [];
+    for (var i = 0; i < servers.length; i++) {
+        var url = servers[i] && servers[i].url ? String(servers[i].url) : '';
+        var domainKey = _getDomainKeyFromUrl(url);
+        if (!domainKey) continue;
+        var allowed = DOMAIN_REGIONS[domainKey] || [];
+        for (var j = 0; j < allowed.length; j++) {
+            if (url.indexOf('{region}') !== -1 || url.indexOf(allowed[j]) !== -1) {
+                regions[allowed[j]] = true;
+            }
+        }
+    }
+    var remotes = entry.remotes || [];
+    for (var k = 0; k < remotes.length; k++) {
+        var rUrl = remotes[k] && remotes[k].url ? String(remotes[k].url) : '';
+        var rDomainKey = _getDomainKeyFromUrl(rUrl);
+        if (!rDomainKey) continue;
+        var rAllowed = DOMAIN_REGIONS[rDomainKey] || [];
+        for (var m = 0; m < rAllowed.length; m++) {
+            if (rUrl.indexOf(rAllowed[m]) !== -1) {
+                regions[rAllowed[m]] = true;
+            }
+        }
+    }
+    var count = 0;
+    for (var key in regions) {
+        if (Object.prototype.hasOwnProperty.call(regions, key)) count++;
+    }
+    return count;
+}
+
+function getRegionWarningFor(entry) {
+    var state = getLockedRegionState();
+    if (!state.locked) return { shouldShow: false, message: '' };
+    if (!entry) return { shouldShow: false, message: '' };
+    var region = state.region;
+    if (!region) return { shouldShow: false, message: '' };
+
+    // Unknown region ⇒ we can't assert non-support, so never warn.
+    var isKnown = false;
+    for (var domainKey in DOMAIN_REGIONS) {
+        if (!Object.prototype.hasOwnProperty.call(DOMAIN_REGIONS, domainKey)) continue;
+        var list = DOMAIN_REGIONS[domainKey];
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] === region) { isKnown = true; break; }
+        }
+        if (isKnown) break;
+    }
+    if (!isKnown) return { shouldShow: false, message: '' };
+
+    var matching;
+    if (entry.remotes) {
+        matching = filterRemotesForRegion(entry.remotes, region);
+    } else {
+        matching = filterServersForRegion(entry.servers || [], region);
+    }
+    if (matching && matching.length > 0) return { shouldShow: false, message: '' };
+
+    var label = state.displayLabel || _formatRegionLabel(region);
+    var msg = 'This API is not available in ' + label + '. The request will still be routed to ' + label + '; expect authentication or data-scope errors.';
+    return { shouldShow: true, message: msg };
+}
+
+window.getLockedRegionState = getLockedRegionState;
+window.filterRemotesForRegion = filterRemotesForRegion;
+window.getRegionWarningFor = getRegionWarningFor;
+
+function applyRegionLockToAuthModal() {
+    var label = document.getElementById('regionLockedLabel');
+    var labelValue = document.getElementById('regionLockedLabelValue');
+    var serverSelect = document.getElementById('serverSelect');
+    var regionRow = document.getElementById('serverRegionRow');
+    if (!label) return;
+
+    var state = getLockedRegionState();
+    if (state.locked) {
+        if (labelValue) labelValue.textContent = state.displayLabel || (state.region ? state.region : '—');
+        label.hidden = false;
+        if (serverSelect) serverSelect.hidden = true;
+        if (regionRow) regionRow.style.display = 'none';
+    } else {
+        label.hidden = true;
+        if (serverSelect) serverSelect.hidden = false;
+        // regionRow visibility is derived from onServerChange — leave it alone.
+    }
+}
+
+function applyAnonymousPickerVisibility(entryMeta) {
+    var state = getLockedRegionState();
+    if (state.locked) return;
+    if (!entryMeta) return;
+    var regionRow = document.getElementById('serverRegionRow');
+    var regionPreset = document.getElementById('regionPreset');
+    var distinct = _countDistinctRegionsForEntry(entryMeta);
+
+    if (distinct <= 1) {
+        if (regionRow) regionRow.style.display = 'none';
+        return;
+    }
+    if (regionRow) regionRow.style.display = 'flex';
+
+    // Pre-select the FIRST declared region in the entry's metadata.
+    if (regionPreset) {
+        var firstRegion = null;
+        var sources = (entryMeta.servers || []).concat(entryMeta.remotes || []);
+        for (var i = 0; i < sources.length && !firstRegion; i++) {
+            var url = sources[i] && sources[i].url ? String(sources[i].url) : '';
+            var domainKey = _getDomainKeyFromUrl(url);
+            if (!domainKey) continue;
+            var allowed = DOMAIN_REGIONS[domainKey] || [];
+            for (var j = 0; j < allowed.length; j++) {
+                if (url.indexOf('{region}') !== -1 || url.indexOf(allowed[j]) !== -1) {
+                    firstRegion = allowed[j];
+                    break;
+                }
+            }
+        }
+        if (firstRegion) regionPreset.value = firstRegion;
+    }
+}
+
+function renderRegionMismatchBanner(entryMeta) {
+    var banner = document.getElementById('regionMismatchBanner');
+    if (!banner) return;
+    var warning = getRegionWarningFor(entryMeta);
+    if (warning.shouldShow) {
+        banner.textContent = warning.message;
+        banner.hidden = false;
+    } else {
+        banner.textContent = '';
+        banner.hidden = true;
+    }
+}
+
+window.applyRegionLockToAuthModal = applyRegionLockToAuthModal;
+window.applyAnonymousPickerVisibility = applyAnonymousPickerVisibility;
+window.renderRegionMismatchBanner = renderRegionMismatchBanner;
 
 function getValidRegionsForServerType(type) {
     if (type === 'eu') {
@@ -9136,3 +9325,25 @@ function downloadSkillZip(skillRelPath, slug) {
             alert('Download failed. Please try again.');
         });
 }
+
+document.addEventListener('DOMContentLoaded', function initRegionLock() {
+    try { applyRegionLockToAuthModal(); } catch (_e) {}
+
+    var pageKind = document.body && document.body.dataset ? document.body.dataset.pageKind : null;
+    if (!pageKind) return;
+
+    var entry = null;
+    if (pageKind === 'api') {
+        var apiSlug = document.body.dataset.apiSlug;
+        var opLookup = window.__OP_LOOKUP__ || {};
+        entry = apiSlug ? opLookup[apiSlug] : null;
+    } else if (pageKind === 'mcp') {
+        var mcpSlug = document.body.dataset.mcpSlug;
+        var mcpLookup = window.__MCP_LOOKUP__ || {};
+        entry = mcpSlug ? mcpLookup[mcpSlug] : null;
+    }
+    if (!entry) return;
+
+    try { applyAnonymousPickerVisibility(entry); } catch (_e) {}
+    try { renderRegionMismatchBanner(entry); } catch (_e) {}
+});

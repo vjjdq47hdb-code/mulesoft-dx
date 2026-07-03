@@ -2543,3 +2543,338 @@ describe('applyAuthModalMode (logged-in state)', () => {
     });
 });
 
+// ===========================================================================
+// W-23196976: Region lock — pure functions
+//
+// The plan proposes a `loadPortalJsWithSessionStorage` helper that re-`require`s
+// portal.js. This test file, however, `eval`s portal.js once into the module
+// scope (top of the file) — portal.js is a browser script with no exports and
+// must not be re-loaded (it would clobber closures and re-register listeners).
+// Adapting the helper: `setLockedSession` just manipulates the real jsdom
+// sessionStorage and optionally the token-expires-at slot; `isTokenExpired`
+// already reads that slot, so we don't need to stub it. When the plan asks for
+// "tokenExpired: true", we set an expired timestamp; otherwise a future one.
+// Frozen interfaces from Layer 1 (Task 4/5): the region-lock helpers attach
+// themselves to `window`; the tests below invoke them through `window.*`.
+// ===========================================================================
+
+function setLockedSession(session) {
+    sessionStorage.clear();
+    var opts = session || {};
+    if (opts.anypoint_token !== undefined) {
+        sessionStorage.setItem('anypoint_token', String(opts.anypoint_token));
+    }
+    if (opts.anypoint_server_type !== undefined) {
+        sessionStorage.setItem('anypoint_server_type', String(opts.anypoint_server_type));
+    }
+    if (opts.anypoint_region !== undefined) {
+        sessionStorage.setItem('anypoint_region', String(opts.anypoint_region));
+    }
+    // Default: if a token is present but the caller didn't specify expiry,
+    // set a future expiry so isTokenExpired() returns false.
+    if (opts.tokenExpired === true) {
+        sessionStorage.setItem('anypoint_token_expires_at', '0');
+    } else if (opts.anypoint_token !== undefined) {
+        sessionStorage.setItem(
+            'anypoint_token_expires_at',
+            String(Date.now() + 3600000)
+        );
+    }
+    return window;
+}
+
+// ===========================================================================
+// Task 6 — getLockedRegionState (AC 1, AC 10, AC 11)
+// ===========================================================================
+describe('getLockedRegionState (W-23196976)', function () {
+    afterEach(function () { sessionStorage.clear(); });
+
+    test('unauthenticated → locked=false', function () {
+        var w = setLockedSession({});
+        var state = w.getLockedRegionState();
+        expect(state.locked).toBe(false);
+        expect(state.serverType).toBeNull();
+        expect(state.region).toBeNull();
+        expect(state.displayLabel).toBe('');
+    });
+
+    test('token + server type + region + not expired → locked=true, EU1 label', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'eu',
+            anypoint_region: 'eu1'
+        });
+        var state = w.getLockedRegionState();
+        expect(state.locked).toBe(true);
+        expect(state.serverType).toBe('eu');
+        expect(state.region).toBe('eu1');
+        expect(state.displayLabel).toBe('EU1');
+    });
+
+    test('token expired → locked=false', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'eu',
+            anypoint_region: 'eu1',
+            tokenExpired: true
+        });
+        expect(w.getLockedRegionState().locked).toBe(false);
+    });
+
+    test('token present but no server_type → locked=false', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_region: 'eu1'
+        });
+        expect(w.getLockedRegionState().locked).toBe(false);
+    });
+
+    test('serverType=us with no region → still locked, empty label', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'us'
+        });
+        var state = w.getLockedRegionState();
+        expect(state.locked).toBe(true);
+        expect(state.region).toBeNull();
+    });
+
+    test('custom unknown region string → surfaces as uppercase label', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'platform',
+            anypoint_region: 'xyz1'
+        });
+        expect(w.getLockedRegionState().displayLabel).toBe('XYZ1');
+    });
+});
+
+// ===========================================================================
+// Task 6 — filterRemotesForRegion (AC 9 — MCP parity)
+// ===========================================================================
+describe('filterRemotesForRegion (W-23196976)', function () {
+    afterEach(function () { sessionStorage.clear(); });
+
+    test('single-region MCP: eu1 remote matches region=eu1', function () {
+        var remotes = [{ type: 'streamable-http', url: 'https://eu1.anypoint.mulesoft.com/exchange/mcp' }];
+        var out = window.filterRemotesForRegion(remotes, 'eu1');
+        expect(out).toHaveLength(1);
+    });
+
+    test('multi-region MCP: only ca1 remote returned for region=ca1', function () {
+        var remotes = [
+            { url: 'https://anypoint.mulesoft.com/exchange/mcp' },
+            { url: 'https://eu1.anypoint.mulesoft.com/exchange/mcp' },
+            { url: 'https://ca1.platform.mulesoft.com/exchange/mcp' }
+        ];
+        var out = window.filterRemotesForRegion(remotes, 'ca1');
+        expect(out).toHaveLength(1);
+        expect(out[0].url).toMatch(/ca1\.platform/);
+    });
+
+    test('no matching region → empty array', function () {
+        var remotes = [{ url: 'https://us.anypoint.mulesoft.com/mcp' }];
+        var out = window.filterRemotesForRegion(remotes, 'jp1');
+        expect(out).toHaveLength(0);
+    });
+
+    test('null region → returns copy of input (pass-through)', function () {
+        var remotes = [{ url: 'https://eu1.anypoint.mulesoft.com/mcp' }];
+        var out = window.filterRemotesForRegion(remotes, null);
+        expect(out).toHaveLength(1);
+    });
+});
+
+// ===========================================================================
+// Task 6 — getRegionWarningFor (AC 2, AC 3, AC 8, AC 9, AC 10)
+// ===========================================================================
+describe('getRegionWarningFor (W-23196976)', function () {
+    afterEach(function () { sessionStorage.clear(); });
+
+    test('locked + mismatch (eu1 vs us-only API) → shouldShow=true', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'eu',
+            anypoint_region: 'eu1'
+        });
+        var entry = { servers: [{ url: 'https://us.anypoint.mulesoft.com/apiservice/v1' }] };
+        var warning = w.getRegionWarningFor(entry);
+        expect(warning.shouldShow).toBe(true);
+        expect(warning.message).toContain('EU1');
+    });
+
+    test('locked + match → shouldShow=false', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'eu',
+            anypoint_region: 'eu1'
+        });
+        var entry = { servers: [{ url: 'https://eu1.anypoint.mulesoft.com/apiservice/v1' }] };
+        expect(w.getRegionWarningFor(entry).shouldShow).toBe(false);
+    });
+
+    test('locked + unknown region → shouldShow=false', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'platform',
+            anypoint_region: 'xyz1'
+        });
+        var entry = { servers: [{ url: 'https://us.anypoint.mulesoft.com/apiservice/v1' }] };
+        expect(w.getRegionWarningFor(entry).shouldShow).toBe(false);
+    });
+
+    test('anonymous → shouldShow=false', function () {
+        var w = setLockedSession({});
+        var entry = { servers: [{ url: 'https://us.anypoint.mulesoft.com/apiservice/v1' }] };
+        expect(w.getRegionWarningFor(entry).shouldShow).toBe(false);
+    });
+
+    test('MCP entry with matching remote → shouldShow=false', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'eu',
+            anypoint_region: 'eu1'
+        });
+        var entry = { remotes: [{ url: 'https://eu1.anypoint.mulesoft.com/exchange/mcp' }] };
+        expect(w.getRegionWarningFor(entry).shouldShow).toBe(false);
+    });
+});
+
+// ===========================================================================
+// Task 7 — DOM toggle helpers
+// ===========================================================================
+function mountAuthPanelDom() {
+    document.body.innerHTML = ''
+        + '<div id="authModal">'
+        + '  <select id="serverSelect"><option value="anypoint">us</option><option value="platform">ca1</option></select>'
+        + '  <div id="serverRegionRow"><select id="regionPreset"><option value="us">US</option><option value="eu1">EU1</option></select></div>'
+        + '  <div id="regionLockedLabel" hidden>Region: <span id="regionLockedLabelValue">—</span></div>'
+        + '</div>'
+        + '<div id="regionMismatchBanner" hidden></div>';
+}
+
+// ===========================================================================
+// Task 7 — applyRegionLockToAuthModal (AC 1, AC 5)
+// ===========================================================================
+describe('applyRegionLockToAuthModal (W-23196976)', function () {
+    afterEach(function () {
+        sessionStorage.clear();
+        document.body.innerHTML = '';
+    });
+
+    test('locked state hides #serverSelect + #serverRegionRow and shows #regionLockedLabel', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'eu',
+            anypoint_region: 'eu1'
+        });
+        mountAuthPanelDom();
+        w.applyRegionLockToAuthModal();
+        expect(document.getElementById('regionLockedLabel').hidden).toBe(false);
+        expect(document.getElementById('regionLockedLabelValue').textContent).toBe('EU1');
+        expect(document.getElementById('serverSelect').hidden).toBe(true);
+        expect(document.getElementById('serverRegionRow').style.display).toBe('none');
+    });
+
+    test('unlocked state shows #serverSelect and hides #regionLockedLabel', function () {
+        var w = setLockedSession({});
+        mountAuthPanelDom();
+        w.applyRegionLockToAuthModal();
+        expect(document.getElementById('regionLockedLabel').hidden).toBe(true);
+        expect(document.getElementById('serverSelect').hidden).toBe(false);
+    });
+
+    test('idempotent — repeated calls converge on the same DOM state', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'us',
+            anypoint_region: 'us'
+        });
+        mountAuthPanelDom();
+        w.applyRegionLockToAuthModal();
+        w.applyRegionLockToAuthModal();
+        w.applyRegionLockToAuthModal();
+        expect(document.getElementById('regionLockedLabel').hidden).toBe(false);
+        expect(document.getElementById('regionLockedLabelValue').textContent).toBe('US');
+    });
+});
+
+// ===========================================================================
+// Task 7 — applyAnonymousPickerVisibility (AC 6, AC 7)
+// ===========================================================================
+describe('applyAnonymousPickerVisibility (W-23196976)', function () {
+    afterEach(function () {
+        sessionStorage.clear();
+        document.body.innerHTML = '';
+    });
+
+    test('single-region API hides #serverRegionRow', function () {
+        var w = setLockedSession({});
+        mountAuthPanelDom();
+        var entry = { servers: [{ url: 'https://us.anypoint.mulesoft.com/apiservice/v1' }] };
+        w.applyAnonymousPickerVisibility(entry);
+        expect(document.getElementById('serverRegionRow').style.display).toBe('none');
+    });
+
+    test('multi-region API keeps picker visible', function () {
+        var w = setLockedSession({});
+        mountAuthPanelDom();
+        var entry = { servers: [
+            { url: 'https://us.anypoint.mulesoft.com/apiservice/v1' },
+            { url: 'https://eu1.anypoint.mulesoft.com/apiservice/v1' }
+        ]};
+        w.applyAnonymousPickerVisibility(entry);
+        expect(document.getElementById('serverRegionRow').style.display).toBe('flex');
+    });
+
+    test('locked user is a no-op (never overrides)', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'eu',
+            anypoint_region: 'eu1'
+        });
+        mountAuthPanelDom();
+        document.getElementById('serverRegionRow').style.display = 'flex';
+        var entry = { servers: [{ url: 'https://us.anypoint.mulesoft.com/apiservice/v1' }] };
+        w.applyAnonymousPickerVisibility(entry);
+        expect(document.getElementById('serverRegionRow').style.display).toBe('flex');
+    });
+});
+
+// ===========================================================================
+// Task 7 — renderRegionMismatchBanner (AC 2, AC 3)
+// ===========================================================================
+describe('renderRegionMismatchBanner (W-23196976)', function () {
+    afterEach(function () {
+        sessionStorage.clear();
+        document.body.innerHTML = '';
+    });
+
+    test('locked + mismatch → banner unhidden with message', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'eu',
+            anypoint_region: 'eu1'
+        });
+        mountAuthPanelDom();
+        var entry = { servers: [{ url: 'https://us.anypoint.mulesoft.com/apiservice/v1' }] };
+        w.renderRegionMismatchBanner(entry);
+        var banner = document.getElementById('regionMismatchBanner');
+        expect(banner.hidden).toBe(false);
+        expect(banner.textContent).toContain('EU1');
+    });
+
+    test('locked + match → banner hidden with empty text', function () {
+        var w = setLockedSession({
+            anypoint_token: 'x',
+            anypoint_server_type: 'eu',
+            anypoint_region: 'eu1'
+        });
+        mountAuthPanelDom();
+        var entry = { servers: [{ url: 'https://eu1.anypoint.mulesoft.com/apiservice/v1' }] };
+        w.renderRegionMismatchBanner(entry);
+        var banner = document.getElementById('regionMismatchBanner');
+        expect(banner.hidden).toBe(true);
+        expect(banner.textContent).toBe('');
+    });
+});

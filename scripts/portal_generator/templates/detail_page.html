@@ -6,7 +6,7 @@
 <link rel="alternate" type="text/markdown" href="{{ base_url }}/apis/{{ api.slug }}.md">
 {% endblock %}
 
-{% block body_attrs %} class="detail-page"{% endblock %}
+{% block body_attrs %} class="detail-page" data-page-kind="api" data-api-slug="{{ api.slug }}"{% endblock %}
 
 {% block head_scripts %}
 {% include "partials/prism_head.html" %}
@@ -21,6 +21,9 @@
 {% set api_name = api.name %}
 {% set api_version = api.version %}
 {% include "partials/auth_panel.html" %}
+
+<!-- TODO(marcelo): confirm final copy -->
+<div id="regionMismatchBanner" class="region-mismatch-banner" hidden role="alert"></div>
 
 <div class="detail-layout">
     {% include "partials/sidebar.html" %}

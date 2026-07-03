@@ -10272,3 +10272,26 @@ pre.mcp-install-command,
 .portal-cookie-settings .ot-sdk-show-settings:hover {
   text-decoration: underline;
 }
+
+/* ============ Region lock (W-23196976) ============ */
+
+.region-locked-label {
+    padding: var(--space-sm) 0;
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-3);
+}
+
+.region-locked-label > span {
+    color: var(--color-text-primary);
+    font-weight: var(--font-weight-semibold);
+}
+
+.region-mismatch-banner {
+    margin: var(--space-md) 0;
+    padding: var(--space-sm) var(--space-md);
+    border-left: 3px solid var(--color-warning);
+    background: var(--color-bg-surface);
+    color: var(--color-text-primary);
+    border-radius: var(--radius-medium);
+    font-size: var(--font-size-3);
+}

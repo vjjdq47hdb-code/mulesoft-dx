@@ -6,7 +6,7 @@
 <link rel="alternate" type="text/markdown" href="{{ base_url }}/mcps/{{ mcp.slug }}.md">
 {% endblock %}
 
-{% block body_attrs %} class="detail-page mcp-detail-page"{% endblock %}
+{% block body_attrs %} class="detail-page mcp-detail-page" data-page-kind="mcp" data-mcp-slug="{{ mcp.slug }}"{% endblock %}
 
 {% block head_scripts %}
 {% include "partials/prism_head.html" %}
@@ -33,6 +33,9 @@ document.addEventListener('DOMContentLoaded', function() {
 {% set prose_only = true %}
 {% endif %}
 {% include "partials/auth_panel.html" %}
+
+<!-- TODO(marcelo): confirm final copy -->
+<div id="regionMismatchBanner" class="region-mismatch-banner" hidden role="alert"></div>
 
 {% include "mcp/install_modal.html" %}
 
